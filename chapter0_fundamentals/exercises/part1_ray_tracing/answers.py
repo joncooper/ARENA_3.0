@@ -65,7 +65,7 @@ def make_rays_1d(num_pixels: int, y_limit: float) -> Tensor:
 
     origin = t.zeros(3)
     src = einops.repeat(origin, 'origin -> n origin', n=num_pixels)
-    dest = t.stack([t.ones(n),
+    dest = t.stack([t.ones(num_pixels),
                     t.linspace(-y_limit, y_limit, num_pixels), 
                     t.zeros(num_pixels)]
                     , dim=1)
@@ -123,41 +123,56 @@ tests.test_intersect_ray_1d(intersect_ray_1d)
 tests.test_intersect_ray_1d_special_case(intersect_ray_1d)
 
 # %%
-ray = t.tensor([[  0.,   0.,   0.], [  1., -10.,   0.]])[:,:2]
-segment = t.tensor([[  1., -12.,   0.],[  1.,  -6.,   0.]])[:,:2]
+def intersect_rays_1d(
+    rays: Float[Tensor, "nrays 2 3"], segments: Float[Tensor, "nsegments 2 3"]
+) -> Bool[Tensor, "nrays"]:
+    """
+    For each ray, return True if it intersects any segment.
+    """
+    # rays:     shape(n, 2 = O|D,   3 = x|y|z)
+    # segments: shape(n, 2 = L1|L2, 3 = x|y|z)
 
+    O, D = rays[:,0,:-1], rays[:,1,:-1] # split origin from destination, keep only x and y (drop z)
+    L1, L2 = segments[:,0,:-1], segments[:,1,:-1] # same idea
+    
+    assert (O.shape == D.shape) and (L1.shape == L2.shape)
+    assert O.shape[-1] == 2 and L1.shape[-1] == 2
 
-L1 = segment[0]
-L2 = segment[1]
-D  = ray[1]
+    A = D - O
+    B = L1 - L2
 
-A = t.stack([D, L1-L2]).T
-B = L1
+    # A: ray_idx,     xy_dim: shape(n, 2)
+    # B: segment_idx, xy_dim: shape(m, 2)
+    # expand out to all pairs (A x B); both now have shape(n, m, 2) where axes are (i: row idx from A, j: row idx from B, d: coords from each row, x and y
+    A_expanded = einops.repeat(A, 'ray_idx     xy_dim -> ray_idx segment_idx xy_dim', segment_idx=B.shape[0])
+    B_expanded = einops.repeat(B, 'segment_idx xy_dim -> ray_idx segment_idx xy_dim', ray_idx=A.shape[0])
+    assert A_expanded.shape == B_expanded.shape
 
-X = t.linalg.solve(A, B)
-A, B, X, A @ X
+    # We want o build a batch of 2x2 matrices, each is row-wise: A[i], B[j], shape overall s/b (n,m,2,2)
+    # so we want (n, m, matrix row, x or y)
+    matrices = t.stack([A_expanded, B_expanded], dim=-1)
+
+    # Find cases where the ray and segment are parallel (or overlapping), and duct tape them
+    #
+    # NOTE: linear algebra functions in torch are batch-aware: a shape (n,m,2,2) will treat dims -2,-1 as a matrix,
+    #       performing the operation and returning a tensor of shape (n,m)
+    determinants = t.linalg.det(matrices)
+    mask = determinants.abs() < 1e-8
+    matrices[mask] = t.eye(2) # identity matrix; solver will just return the vector we're solving for
+
+    # copy each L1, adding a dimension at the start to hold them of size = matrix's first dim
+    V_exp = einops.repeat(L1, 'j d -> i j d', i=matrices.shape[0])
+
+    x_hat = t.linalg.solve(matrices, V_exp)
+
+    # We want to return a boolean tensor over rays, True if it intersects any segment, False else
+    u, v = x_hat[..., 0], x_hat[..., 1]
+    return ((u >= 0) & (v >= 0) & (v <= 1)).any(dim=1)
+
+tests.test_intersect_rays_1d(intersect_rays_1d)
+tests.test_intersect_rays_1d_special_case(intersect_rays_1d)
+
 
 # %%
-fig: go.FigureWidget = setup_widget_fig_ray()
-display(fig)
-
-
-@interact(v=(0.0, 6.0, 0.01), seed=(0,10,1))
-def update(v=0.0, seed=0):
-    t.manual_seed(seed)
-    L_1, L_2 = t.rand(2, 2)
-    print(L_1, L_2)
-    P = lambda v: L_1 + v * (L_2 - L_1)
-    x, y = zip(P(0), P(6))
-    with fig.batch_update():
-        fig.update_traces({"x": x, "y": y}, 0)
-        fig.update_traces({"x": [L_1[0], L_2[0]], "y": [L_1[1], L_2[1]]}, 1)
-        fig.update_traces({"x": [P(v)[0]], "y": [P(v)[1]]}, 2)
-# %%
-A = t.tensor([[6., 3.], [3., -4.]])
-B = t.tensor([1., 2.])
-X = t.linalg.solve(A, B)
-X
-# %%
-A @ X
+x_hat.shape
 # %%
