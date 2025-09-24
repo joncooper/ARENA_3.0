@@ -284,15 +284,48 @@ def triangle_ray_intersects(A: Point, B: Point, C: Point, O: Point, D: Point) ->
 tests.test_triangle_ray_intersects(triangle_ray_intersects)
 
 # %%
-A = t.tensor((2,0,-1)).float()
-B = t.tensor((2,-1,0)).float()
-C = t.tensor((2,1,1)).float()
-O = t.tensor((0,0,0)).float()
-D = t.tensor((-1,-0.33,-0.33)).float()
+def raytrace_triangle(
+    rays: Float[Tensor, "nrays rayPoints=2 dims=3"],
+    triangle: Float[Tensor, "trianglePoints=3 dims=3"],
+) -> Bool[Tensor, "nrays"]:
+    """
+    For each ray, return True if the triangle intersects that ray.
+    """
+    nrays = rays.shape[0]
+    # split rays (nrays, od, xyz) into O,D each (nrays, 3)
+    O, D    = rays[:,0,:], rays[:,1,:] 
+    # split triangle (vertices, xyz) into 3 vertices (xyz)
+    A, B, C = triangle[0], triangle[1], triangle[2]
 
-rhs = O - A; rhs
-lhs = t.stack([-D,(B-A),(C-A)],dim=1)
+    # rhs = O<shape(nrays, 3)> - A<shape(3)>; broadcasts to (nrays,3)
+    rhs = O - A
+    # thus we also need this to be of shape (nrays, 3), which makes sense - one per ray, each with xyz coords
+    # -D is already the right size; broadcast out (B-A),(C-A), both are shape(3,3)
+    lhs = t.stack([
+            -D,
+            einops.repeat(B-A, 'coords -> nrays coords', nrays=nrays),
+            einops.repeat(C-A, 'coords -> nrays coords', nrays=nrays)
+        ], dim=-1)
+    print(lhs.shape)
+    x = t.linalg.solve(lhs, rhs)
+    s, u, v = x[:,0], x[:,1], x[:,2]
+    return ((0 <= u) & (0 <= v) & ((u+v) <= 1) & (s >= 0))
 
-s, u, v = t.linalg.solve(lhs, rhs)
-s,u,v
+#%%
+A = t.tensor([1, 0.0, -0.5])
+B = t.tensor([1, -0.5, 0.0])
+C = t.tensor([1, 0.5, 0.5])
+num_pixels_y = num_pixels_z = 15
+y_limit = z_limit = 0.5
+
+# Plot triangle & rays
+test_triangle = t.stack([A, B, C], dim=0)
+rays2d = make_rays_2d(num_pixels_y, num_pixels_z, y_limit, z_limit)
+triangle_lines = t.stack([A, B, C, A, B, C], dim=0).reshape(-1, 2, 3)
+render_lines_with_plotly(rays2d, triangle_lines)
+
+# Calculate and display intersections
+intersects = raytrace_triangle(rays2d, test_triangle)
+img = intersects.reshape(num_pixels_y, num_pixels_z).int()
+imshow(img, origin="lower", width=600, title="Triangle (as intersected by rays)")
 # %%
