@@ -167,12 +167,62 @@ def intersect_rays_1d(
 
     # We want to return a boolean tensor over rays, True if it intersects any segment, False else
     u, v = x_hat[..., 0], x_hat[..., 1]
-    return ((u >= 0) & (v >= 0) & (v <= 1)).any(dim=1)
+
+    # Don't forget to eliminate any parallel cases; the solver will have worked with the
+    # "duct tape to the identity matrix" trick, but we can still end up with u,v in the interval
+    # if the V_exp vector itself was contained in it
+    return ((u >= 0) & (v >= 0) & (v <= 1) & ~mask).any(dim=1)
 
 tests.test_intersect_rays_1d(intersect_rays_1d)
 tests.test_intersect_rays_1d_special_case(intersect_rays_1d)
 
+# %%
+def make_rays_2d(
+    num_pixels_y: int, num_pixels_z: int, y_limit: float, z_limit: float
+) -> Float[Tensor, "nrays 2 3"]:
+    """
+    num_pixels_y: The number of pixels in the y dimension
+    num_pixels_z: The number of pixels in the z dimension
 
-# %%
-x_hat.shape
-# %%
+    y_limit: At x=1, the rays should extend from -y_limit to +y_limit, inclusive of both.
+    z_limit: At x=1, the rays should extend from -z_limit to +z_limit, inclusive of both.
+
+    Returns: shape (num_rays=num_pixels_y * num_pixels_z, num_points=2, num_dims=3).
+    """
+    # that is confusing.
+    #
+    # - there are num_pixels_y * num_pixels_z rays
+    # - they all start at (0,0,0)
+    # - they all end on the yz plane at (1,y,z)
+    #
+    # # how is that
+
+    # # (one ray per pixel)
+    # n_rays = num_pixels_y * num_pixels_z 
+    # rays = t.zeros(n_rays, 2, 3)
+    # # fill y on destination coordinate of all rays
+    # t.linspace(-y_limit, y_limit, num_pixels_y, out=rays[:,1,1]) 
+    # # fill z
+    # t.linspace(-z_limit, z_limit, num_pixels_z, out=rays[:,1,2])
+    # # if I've understood correctly, all x values should be set to 1;
+    # # that isn't very obvious from the docstring?
+    # rays[:,1,0] = 1
+    # print(num_pixels_y, num_pixels_z, y_limit, z_limit, rays)
+    
+    n_pixels = num_pixels_y * num_pixels_z
+    ygrid = t.linspace(-y_limit, y_limit, num_pixels_y)
+    zgrid = t.linspace(-z_limit, z_limit, num_pixels_z)
+
+    rays = t.zeros(n_pixels, 2, 3, dtype=t.float32)
+    # all rays start from the origin and rays was zeroed so we only need to change their destinations [:][1]
+    rays[:,1,0] = 1 # set all x to 1
+    # rays[:,1,1] = einops.repeat(ygrid, 'y -> (y z)', z=num_pixels_z) # fill y with n_pixels_z copies of ygrid
+    # rays[:,1,2] = einops.repeat(zgrid, 'z -> (y z)', y=num_pixels_y) # fill z with n_pixels_y copies of zgrid
+    # ... or better -
+    rays[:,1,1] = ygrid.repeat_interleave(num_pixels_z) # each element, z times
+    rays[:,1,2] = zgrid.repeat(num_pixels_y)            # each array, y times
+
+    return rays
+
+rays_2d = make_rays_2d(10, 10, 0.3, 0.3)
+render_lines_with_plotly(rays_2d)
