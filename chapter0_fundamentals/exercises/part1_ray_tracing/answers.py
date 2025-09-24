@@ -226,3 +226,73 @@ def make_rays_2d(
 
 rays_2d = make_rays_2d(10, 10, 0.3, 0.3)
 render_lines_with_plotly(rays_2d)
+
+# %%
+one_triangle = t.tensor([[0, 0, 0], [4, 0.5, 0], [2, 3, 0]])
+A, B, C = one_triangle
+x, y, z = one_triangle.T
+
+fig: go.FigureWidget = setup_widget_fig_triangle(x, y, z)
+display(fig)
+
+
+@interact(u=(-0.5, 1.5, 0.01), v=(-0.5, 1.5, 0.01))
+def update(u=0.0, v=0.0):
+    P = A + u * (B - A) + v * (C - A)
+    fig.update_traces({"x": [P[0]], "y": [P[1]]}, 2)
+# %%
+
+# Barycentric Coordinates
+# 
+# - Define a triangle by 3 non-colinear points A, B, C
+# - Write alegebraically as a convex combination: P(w,u,v) = wA + uB + vC
+#                                                 s.t. 0 <= w,u,v
+#                                                      1 = w + u + v
+#                                Or equivalently: P(u,v) = (1-u-v)A + uB + vC
+#                                                        = A + u(B-A) + v(C-A)
+#                                                 s.t. 0 <= u,v
+#                                                  u + v <= 1
+# - The u,v in the latter formulation are called "barycentric coordinates". 
+# - Vertices of the triangle are (0,0); (0,1); (1,0)
+#
+# Triangle-Ray Intersection
+#  
+# - Given a ray with origin O and direction D, with points given by P(s) = O + sD
+# - Find intersection of line OD and the plane containing the trangle: solve P(u,v)=P(s)
+# - Check if u,v are within the bounds of the triangle
+
+Point = Float[Tensor, "points=3"]
+
+def triangle_ray_intersects(A: Point, B: Point, C: Point, O: Point, D: Point) -> bool:
+    """
+    A: shape (3,), one vertex of the triangle
+    B: shape (3,), second vertex of the triangle
+    C: shape (3,), third vertex of the triangle
+    O: shape (3,), origin point
+    D: shape (3,), direction point
+
+    Return True if the ray and the triangle intersect.
+    """
+    rhs = O - A
+    lhs = t.stack([-D,(B-A),(C-A)], dim=1)
+    s,u,v = t.linalg.solve(lhs, rhs)
+
+    # Need to test s >= 0 because we don't care about intersections "behind us"
+    return ((0 <= u) and (0 <= v) and ((u+v) <= 1) and (s >= 0)).item()
+    
+
+tests.test_triangle_ray_intersects(triangle_ray_intersects)
+
+# %%
+A = t.tensor((2,0,-1)).float()
+B = t.tensor((2,-1,0)).float()
+C = t.tensor((2,1,1)).float()
+O = t.tensor((0,0,0)).float()
+D = t.tensor((-1,-0.33,-0.33)).float()
+
+rhs = O - A; rhs
+lhs = t.stack([-D,(B-A),(C-A)],dim=1)
+
+s, u, v = t.linalg.solve(lhs, rhs)
+s,u,v
+# %%
