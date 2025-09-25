@@ -306,10 +306,55 @@ def raytrace_triangle(
             einops.repeat(B-A, 'coords -> nrays coords', nrays=nrays),
             einops.repeat(C-A, 'coords -> nrays coords', nrays=nrays)
         ], dim=-1)
-    print(lhs.shape)
+    # we need to not crash if rays lie parallel to the triangle plane
+    dets = t.linalg.det(lhs)
+    is_singular = dets.abs() < 1e-8
+    lhs[is_singular] = t.eye(3)
+    
     x = t.linalg.solve(lhs, rhs)
     s, u, v = x[:,0], x[:,1], x[:,2]
-    return ((0 <= u) & (0 <= v) & ((u+v) <= 1) & (s >= 0))
+
+    s, u, v = x[:,0], x[:,1], x[:,2]
+    return ((0 <= u) & (0 <= v) & ((u+v) <= 1) & (s >= 0) & ~is_singular)
+
+# For comparison (now that mine works) here is the ARENA version:
+
+# def raytrace_triangle(
+#     rays: Float[Tensor, "nrays rayPoints=2 dims=3"],
+#     triangle: Float[Tensor, "trianglePoints=3 dims=3"],
+# ) -> Bool[Tensor, "nrays"]:
+#     """
+#     For each ray, return True if the triangle intersects that ray.
+#     """
+#     NR = rays.size(0)
+
+#     # Triangle is [[Ax, Ay, Az], [Bx, By, Bz], [Cx, Cy, Cz]]
+#     A, B, C = einops.repeat(triangle, "pts dims -> pts NR dims", NR=NR)
+#     assert A.shape == (NR, 3)
+
+#     # Each element of `rays` is [[Ox, Oy, Oz], [Dx, Dy, Dz]]
+#     O, D = rays.unbind(dim=1)
+#     assert O.shape == (NR, 3)
+
+#     # Define matrix on left hand side of equation
+#     mat: Float[Tensor, "NR 3 3"] = t.stack([-D, B - A, C - A], dim=-1)
+
+#     # Get boolean of where matrix is singular, and replace it with the identity in these positions
+#     # Note - this works because mat[is_singular] has shape (NR_where_singular, 3, 3), so we
+#     # can broadcast the identity matrix to that shape.
+#     dets: Float[Tensor, "NR"] = t.linalg.det(mat)
+#     is_singular = dets.abs() < 1e-8
+#     mat[is_singular] = t.eye(3)
+
+#     # Define vector on the right hand side of equation
+#     vec = O - A
+
+#     # Solve eqns
+#     sol: Float[Tensor, "NR 3"] = t.linalg.solve(mat, vec)
+#     s, u, v = sol.unbind(dim=-1)
+
+#     # Return boolean of (matrix is nonsingular) && (solution is in correct range implying intersection)
+#     return (s >= 0) & (u >= 0) & (v >= 0) & (u + v <= 1) & ~is_singular
 
 #%%
 A = t.tensor([1, 0.0, -0.5])
@@ -328,4 +373,151 @@ render_lines_with_plotly(rays2d, triangle_lines)
 intersects = raytrace_triangle(rays2d, test_triangle)
 img = intersects.reshape(num_pixels_y, num_pixels_z).int()
 imshow(img, origin="lower", width=600, title="Triangle (as intersected by rays)")
+# %%
+triangles = t.load(section_dir / "pikachu.pt", weights_only=True)
+
+# %%
+
+# For our purposes, a mesh is just a group of triangles, so to render it we'll intersect all rays and all triangles at once. We previously just returned a boolean for whether a given ray intersects the triangle, but now it's possible that more than one triangle intersects a given ray.
+
+# For each ray (pixel) we will return a float representing the minimum distance to a triangle if applicable, otherwise the special value float('inf') representing infinity. We won't return which triangle was intersected for now.
+
+# Note - by distance to a triangle, we specifically mean distance along the x-dimension, not Euclidean distance.
+
+# Implement raytrace_mesh and as before, reshape and visualize the output. Your Pikachu is centered on (0, 0, 0), so you'll want to slide the ray origin back to at least x=-2 to see it properly.
+
+# Reminder - t.linalg.solve (and most batched operations) can accept multiple dimensions as being batch dims. Previously, you've just used NR (the number of rays) as the batch dimension, but you can also use (NR, NT) (the number of rays and triangles) as your batch dimensions, so you can solve for all rays and triangles at once.
+
+def raytrace_mesh(
+    rays: Float[Tensor, "nrays rayPoints=2 dims=3"],
+    triangles: Float[Tensor, "ntriangles trianglePoints=3 dims=3"],
+) -> Float[Tensor, "nrays"]:
+    """
+    For each ray, return the distance to the closest intersecting triangle, or infinity.
+    """
+    # - Intersect all rays and all triangles at once
+    # - A ray may hit 0 or >=1 triangles; return inf if 0 else min(intersected[].x)
+    # - HINT: use (n_rays, n_tris) as batch dimensions to solve for all rays, tris
+    # - Geometry we imported is centered on (0,0,0) so move ray origin back, >= x=-2
+    n_rays = rays.shape[0]
+    n_tris = triangles.shape[0]
+
+    # Each element of rays is [[Ox,Oy,Oz],[Dx,Dy,Dz]]: shape (n_rays, 3)
+    O, D = rays.unbind(dim=1)
+    assert O.shape == (n_rays, 3)
+
+    # Each element of tris is [[Ax,Ay,Az],[Bx,By,Bz],[Cx,Cy,Cz]]: shape (n_tris, 3, 3)
+    A, B, C = triangles.unbind(dim=1)
+    assert A.shape == (n_tris, 3)
+
+    # The idea is to use the fact that the solver will work on the last 2
+    # dimensions of the tensors it is given to solve a big batch at once.
+
+    # We want to stack 3 things of shape (n_rays, n_tris, 3, 3)
+    # into a batch matrix of shape (n_rays, n_tris, cols, 3, 3)
+    C1 = einops.repeat(-D,    'r_i xyz     -> r_i nt  3   xyz', nt=n_tris) 
+    C2 = einops.repeat(B - A, 't_i xyz -> nr  t_i 3 xyz', nr=n_rays)
+    C3 = einops.repeat(C - A, 't_i xyz -> nr  t_i 3 xyz', nr=n_rays)
+    # So we want
+    mat: Float[Tensor, "n_rays n_tris 3 3"] # 1 per ray, tri, col, xyz
+    mat = t.stack([C1, C2, C3], dim=-1)
+
+    vec: Float[Tensor, "n_rays n_tris 3"]   # 1 per ray, tri, xyz
+    vec = einops.repeat(O, 'r_i xyz -> r_i nt xyz', nt=n_tris) \
+          - einops.repeat(A, 't_i xyz -> nr t_i xyz', nr=n_rays)
+
+    # ARENA version is same idea but better, broadcasting up first:
+    #
+    # rays = einops.repeat(rays, "NR pts xyz -> pts NR NT xyz", NT=n_tris)
+    # triangles = einops.repeat(triangles, "NT pts xyz -> pts NR NT xyz", NR = n_rays)
+    # A, B, C = triangles 
+    # assert(A.shape == (n_rays, n_tris, 3))
+    # O, D = rays
+    # assert(O.shape == (n_rays, n_tris, 3))
+    # mat = t.stack([-D, B - A, C - A], dim=-1)
+    # vec = O - A
+
+    dets = t.linalg.det(mat)
+    is_singular = dets.abs() < 1e-8
+    mat[is_singular] = t.eye(3)
+
+    x: Float[Tensor, "n_rays n_tris 3"]   # 1 per ray, tri, suv
+    x = t.linalg.solve(mat, vec)
+    s, u, v = x[..., 0], x[..., 1], x[..., 2] # use unbind?
+    intersects = (s >= 0) & (u >= 0) & (v >= 0) & (u + v <= 1) & ~is_singular
+    distances = t.where(intersects, s, t.inf)
+    min_distances, _ =distances.min(dim=1)
+
+    return min_distances
+
+# %%
+num_pixels_y = 120
+num_pixels_z = 120
+y_limit = z_limit = 1
+
+rays = make_rays_2d(num_pixels_y, num_pixels_z, y_limit, z_limit)
+rays[:, 0] = t.tensor([-2, 0.0, 0.0])
+
+rays.shape, triangles.shape
+
+# %%
+# rays: Float[Tensor, "nrays rayPoints=2 dims=3"]
+# tris: Float[Tensor, "ntriangles trianglePoints=3 dims=3"]
+n_rays = rays.shape[0]
+n_tris = triangles.shape[0]
+
+O, D    = rays.unbind(dim=1)      # each (n_rays, 3); O, D = rays[:,0], rays[:1] is equivalent and more explicit
+A, B, C = triangles.unbind(dim=1) # each (n_tris, 3)
+
+mat = t.zeros(n_rays, n_tris, 3, 3)
+mat[..., 0] = -D.unsqueeze(1).expand(-1, n_tris, -1) 
+mat[..., 1] = (B - A).unsqueeze(0).expand(n_rays, -1, -1)
+mat[..., 2] = (C - A).unsqueeze(0).expand(n_rays, -1, -1)
+
+vec = O.unsqueeze(1).expand(-1, n_tris, -1) - A.unsqueeze(0).expand(n_rays, -1, -1)
+dets = t.linalg.det(mat)
+is_singular = dets.abs() < 1e-8
+mat[is_singular] = t.eye(3)
+x = t.linalg.solve(mat, vec)
+s, u, v = x[..., 0], x[..., 1], x[..., 2]
+intersects = (s >= 0) & (u >= 0) & (v >= 0) & (u + v <= 1) & ~is_singular
+distances = t.where(intersects, s, t.inf)
+min_distances, _ = distances.min(dim=1)
+
+dists = min_distances
+intersects = t.isfinite(dists).view(num_pixels_y, num_pixels_z)
+dists_square = dists.view(num_pixels_y, num_pixels_z)
+img = t.stack([intersects, dists_square], dim=0)
+
+fig = px.imshow(img, facet_col=0, origin="lower", color_continuous_scale="magma", width=1000)
+fig.update_layout(coloraxis_showscale=False)
+for i, text in enumerate(["Intersects", "Distance"]):
+    fig.layout.annotations[i]["text"] = text
+fig.show()
+
+# # Add dimensions and expand  we'll use to broadcast into all pairs of rays, tris
+# D = D.unsqueeze(1).expand() # (n_rays, 3) -> (n_rays, 1, 3)
+# O = O.unsqueeze(1).expand() # (n_rays, 3) -> (n_rays, 1, 3)
+# A = A.unsqueeze(0).expand() # (n_tris, 3) -> (1, n_tris, 3) 
+# B = B.unsqueeze(0).expand() # (n_tris, 3) -> (1, n_tris, 3)
+# C = C.unsqueeze(0).expand() # (n_tris, 3) -> (1, n_tris, 3)
+
+
+# # Broadcast out to the batched matrix(es) we need
+# # ...this is still too magical for my taste/understanding
+# mat = t.stack([-D, B - A, C - A], dim=-1)
+# mat.shape
+
+
+# %%
+dists = raytrace_mesh(rays, triangles)
+intersects = t.isfinite(dists).view(num_pixels_y, num_pixels_z)
+dists_square = dists.view(num_pixels_y, num_pixels_z)
+img = t.stack([intersects, dists_square], dim=0)
+
+fig = px.imshow(img, facet_col=0, origin="lower", color_continuous_scale="magma", width=1000)
+fig.update_layout(coloraxis_showscale=False)
+for i, text in enumerate(["Intersects", "Distance"]):
+    fig.layout.annotations[i]["text"] = text
+fig.show()
 # %%
